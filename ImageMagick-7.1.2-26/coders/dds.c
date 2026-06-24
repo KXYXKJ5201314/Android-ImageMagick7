@@ -90,6 +90,7 @@
 
 #define FOURCC_ATI2       0x32495441
 #define FOURCC_BC5U       0x55354342
+#define FOURCC_BC5S       0x53354342
 #define FOURCC_DXT1       0x31545844
 #define FOURCC_DXT3       0x33545844
 #define FOURCC_DXT5       0x35545844
@@ -2139,6 +2140,128 @@ static MagickBooleanType ReadBC5Pixels(Image *image,
   }
   return(MagickTrue);
 }
+static MagickBooleanType ReadBC5SignedPixels(Image *image,
+  const DDSInfo *magick_unused(dds_info),ExceptionInfo *exception)
+{
+  Quantum
+    *q;
+
+  ssize_t
+    i,
+    x,
+    y;
+
+  unsigned char
+    block[16];
+
+  magick_unreferenced(dds_info);
+
+  for (y = 0; y < (ssize_t)image->rows; y += 4)
+  {
+    for (x = 0; x < (ssize_t)image->columns; x += 4)
+    {
+      size_t
+        area;
+
+      ssize_t
+        count;
+
+      /* Get 4x4 patch */
+      q=QueueAuthenticPixels(image,x,y,(size_t)
+        MagickMin(4,(ssize_t)image->columns-x),(size_t)
+        MagickMin(4,(ssize_t)image->rows-y),exception);
+
+      if (q == (Quantum *)NULL)
+        return(MagickFalse);
+
+      /* Read 16 bytes (two BC4 Signed blocks) */
+      count=ReadBlob(image,16,block);
+      if ((count != 16) || (EOFBlob(image) != MagickFalse))
+        return(MagickFalse);
+
+      /* Decode red channel (BC4 Signed: bytes 0-7) */
+      {
+        int r0 = (int)(int8_t)block[0];
+        int r1 = (int)(int8_t)block[1];
+        int r_values[8];
+        r_values[0]=r0;
+        r_values[1]=r1;
+        if (r0 > r1)
+        {
+          r_values[2]=(6*r0+1*r1)/7;
+          r_values[3]=(5*r0+2*r1)/7;
+          r_values[4]=(4*r0+3*r1)/7;
+          r_values[5]=(3*r0+4*r1)/7;
+          r_values[6]=(2*r0+5*r1)/7;
+          r_values[7]=(1*r0+6*r1)/7;
+        }
+        else
+        {
+          r_values[2]=(4*r0+1*r1)/5;
+          r_values[3]=(3*r0+2*r1)/5;
+          r_values[4]=(2*r0+3*r1)/5;
+          r_values[5]=(1*r0+4*r1)/5;
+          r_values[6]=-127;
+          r_values[7]=127;
+        }
+
+        /* Decode green channel (BC4 Signed: bytes 8-15) */
+        int g0 = (int)(int8_t)block[8];
+        int g1 = (int)(int8_t)block[9];
+        int g_values[8];
+        g_values[0]=g0;
+        g_values[1]=g1;
+        if (g0 > g1)
+        {
+          g_values[2]=(6*g0+1*g1)/7;
+          g_values[3]=(5*g0+2*g1)/7;
+          g_values[4]=(4*g0+3*g1)/7;
+          g_values[5]=(3*g0+4*g1)/7;
+          g_values[6]=(2*g0+5*g1)/7;
+          g_values[7]=(1*g0+6*g1)/7;
+        }
+        else
+        {
+          g_values[2]=(4*g0+1*g1)/5;
+          g_values[3]=(3*g0+2*g1)/5;
+          g_values[4]=(2*g0+3*g1)/5;
+          g_values[5]=(1*g0+4*g1)/5;
+          g_values[6]=-127;
+          g_values[7]=127;
+        }
+
+        /* Extract 3-bit indices and write pixels */
+        area=(size_t)(MagickMin(MagickMin(4,(ssize_t)image->columns-x)*
+          MagickMin(4,(ssize_t)image->rows-y),16));
+
+        size_t start_bit_r=16;
+        size_t start_bit_g=80;
+
+        for (i=0; i < (ssize_t)area; i++)
+        {
+          int r_val=r_values[GetBits(block,&start_bit_r,3)];
+          int g_val=g_values[GetBits(block,&start_bit_g,3)];
+
+          /* Map signed [-127,127] -> [0,1] -> Quantum */
+          double r_norm=(double)r_val/127.0;
+          double g_norm=(double)g_val/127.0;
+          double b_norm=sqrt(fmax(1.0-r_norm*r_norm-g_norm*g_norm,0.0));
+
+          SetPixelRed(image,ClampToQuantum((Quantum)((r_norm+1.0)*0.5*QuantumRange+0.5)),q);
+          SetPixelGreen(image,ClampToQuantum((Quantum)((g_norm+1.0)*0.5*QuantumRange+0.5)),q);
+          SetPixelBlue(image,ClampToQuantum((Quantum)((b_norm+1.0)*0.5*QuantumRange+0.5)),q);
+
+          q+=(ptrdiff_t)GetPixelChannels(image);
+        }
+        if (SyncAuthenticPixels(image,exception) == MagickFalse)
+          return(MagickFalse);
+      }
+    }
+    if (EOFBlob(image) != MagickFalse)
+      return(MagickFalse);
+  }
+  return(MagickTrue);
+}
 
 static MagickBooleanType ReadBC5(const ImageInfo *image_info,Image *image,
   const DDSInfo *dds_info,const MagickBooleanType read_mipmaps,
@@ -2149,6 +2272,19 @@ static MagickBooleanType ReadBC5(const ImageInfo *image_info,Image *image,
 
   if (read_mipmaps != MagickFalse)
     return(ReadMipmaps(image_info,image,dds_info,ReadBC5Pixels,exception));
+  else
+    return(SkipMipmaps(image,dds_info,16,exception));
+}
+
+static MagickBooleanType ReadBC5Signed(const ImageInfo *image_info,Image *image,
+  const DDSInfo *dds_info,const MagickBooleanType read_mipmaps,
+  ExceptionInfo *exception)
+{
+  if (ReadBC5SignedPixels(image,dds_info,exception) == MagickFalse)
+    return(MagickFalse);
+
+  if (read_mipmaps != MagickFalse)
+    return(ReadMipmaps(image_info,image,dds_info,ReadBC5SignedPixels,exception));
   else
     return(SkipMipmaps(image,dds_info,16,exception));
 }
@@ -2900,6 +3036,13 @@ static Image *ReadDDSImage(const ImageInfo *image_info,ExceptionInfo *exception)
           compression=BC5Compression;
           decoder=ReadBC5;
           break;
+                  case FOURCC_BC5S:
+                  {
+                    alpha_trait=UndefinedPixelTrait;
+                    compression=BC5Compression;
+                    decoder=ReadBC5Signed;
+                    break;
+                  }
         }
         case FOURCC_DXT1:
         {
@@ -3007,6 +3150,13 @@ static Image *ReadDDSImage(const ImageInfo *image_info,ExceptionInfo *exception)
               compression=BC5Compression;
               decoder=ReadBC5;
               break;
+                          case DXGI_FORMAT_BC5_SNORM:
+                          {
+                            alpha_trait=UndefinedPixelTrait;
+                            compression=BC5Compression;
+                            decoder=ReadBC5Signed;
+                            break;
+                          }
             }
             case DXGI_FORMAT_BC7_UNORM:
             case DXGI_FORMAT_BC7_UNORM_SRGB:
